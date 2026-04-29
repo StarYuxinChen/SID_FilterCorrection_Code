@@ -1,0 +1,183 @@
+clear; clc; close all;
+
+%% =========================================================
+% USER CONFIG
+%% =========================================================
+cfg = struct();
+
+cfg.px_per_mm = 22;
+
+% ---------- top / bottom files ----------
+cfg.fileList_top = {
+    "V:\202311\w318\LIF-Processing\top_11000-17000.dfi"
+    "V:\202311\w318\LIF-Processing\top_17000-23000.dfi"
+    "V:\202311\w318\LIF-Processing\top_23000-29000.dfi"
+    "V:\202311\w318\LIF-Processing\top_29000-35000.dfi"
+    "V:\202311\w318\LIF-Processing\top_35000-41000.dfi"
+    "V:\202311\w318\LIF-Processing\top_41000-47000.dfi"
+    "V:\202311\w318\LIF-Processing\top_47000-53000.dfi"
+    "V:\202311\w318\LIF-Processing\top_53000-59000.dfi"
+};
+
+cfg.fileList_bot = {
+    "V:\202311\w318\LIF-Processing\bot_11000-17000.dfi"
+    "V:\202311\w318\LIF-Processing\bot_17000-23000.dfi"
+    "V:\202311\w318\LIF-Processing\bot_23000-29000.dfi"
+    "V:\202311\w318\LIF-Processing\bot_29000-35000.dfi"
+    "V:\202311\w318\LIF-Processing\bot_35000-41000.dfi"
+    "V:\202311\w318\LIF-Processing\bot_41000-47000.dfi"
+    "V:\202311\w318\LIF-Processing\bot_47000-53000.dfi"
+    "V:\202311\w318\LIF-Processing\bot_53000-59000.dfi"
+};
+
+% ---------- raw and mapping files ----------
+cfg.fRaw = "V:\202311\w318\LIF-Processing\inputs\CamC_dimmer.dfm";
+
+cfg.x_map_file = "V:\202311\w318\LIF-Processing\inputs\w318_ribbon_test2_x_map.txt";
+cfg.y_map_file = "V:\202311\w318\LIF-Processing\inputs\w318_ribbon_test2_y_map.txt";
+
+cfg.mapfun = @mapTo;      % Stefan default
+% cfg.mapfun = @mapToC;   % only if needed
+
+% ---------- frames ----------
+% For testing:
+% cfg.selected_frames = [11000 14000 17000 20000];
+
+% For production:
+cfg.selected_frames = 15000:500:25000;
+
+cfg.N_sel = numel(cfg.selected_frames);
+
+% ---------- Star model fitted windows ----------
+cfg.fit_frame_centers = [14000; 20000; 26000; 32000; 38000; 44000; 50000; 56000];
+
+cfg.z_bot_mm = 4.22;
+cfg.z_top_mm = 42.32;
+
+% ---------- Beer-Lambert / CN ----------
+cfg.alpha_mean = 5e-6;
+cfg.min_positive_value = 1e-10;
+
+cfg.propagation_scheme = 'CN';   % 'explicit' or 'CN'
+cfg.beta_min = 0;
+cfg.beta_max = 1.5;
+
+% For w318, laser enters from physical bottom.
+cfg.propagate_from_bottom = true;
+
+% ---------- raw geometry ----------
+cfg.w_raw = 3320;
+cfg.h_raw = 1024;
+
+cfg.x_raw_mm = (0:cfg.w_raw-1) / cfg.px_per_mm;
+cfg.z_plot_mm = (0:cfg.h_raw-1) / cfg.px_per_mm;
+
+% ---------- output ----------
+cfg.output_dir = "V:\202311\w318\LIF-Processing\outputs\IePrime_ray_and_camera";
+if ~exist(cfg.output_dir, 'dir')
+    mkdir(cfg.output_dir);
+end
+
+cfg.save_ray_mat = true;       % save I_e' in ray space
+cfg.save_cam_mat = true;       % save I_e' inverse-mapped back to camera space
+cfg.save_cam_tif = true;      % optional tif sequence for Stefan input
+cfg.tif_scale = 1;             % uint16 raw scaling if save_cam_tif = true
+
+% ---------- diagnostics ----------
+cfg.show_debug_mapping = true;
+cfg.plot_diagnostic_frame = cfg.selected_frames(1);
+
+%% =========================================================
+% RAW MOVIE INFO
+%% =========================================================
+cfg.fRaw_char = char(cfg.fRaw);
+pRaw = df_dfm_info(cfg.fRaw_char);
+
+fprintf('\nRaw movie configured as h = %d, w = %d\n', cfg.h_raw, cfg.w_raw);
+fprintf('Number of selected frames = %d\n', cfg.N_sel);
+
+%% =========================================================
+% STEP 1: Build top/bottom Star correction model
+%% =========================================================
+fprintf('\nSTEP 1: Building top/bottom temporal-spatial correction model...\n');
+
+starModel = buildTopBottomCorrectionModel( ...
+    cfg.fileList_top, ...
+    cfg.fileList_bot, ...
+    cfg.px_per_mm);
+
+%% =========================================================
+% STEP 2: Build fitted correction field C_fit in camera space
+%% =========================================================
+fprintf('\nSTEP 2: Building C_fit on raw camera grid...\n');
+
+C_fit = buildCameraCorrectionField( ...
+    starModel, ...
+    cfg.x_raw_mm, ...
+    cfg.h_raw, ...
+    cfg.w_raw, ...
+    cfg.z_bot_mm, ...
+    cfg.z_top_mm, ...
+    cfg.min_positive_value);
+
+%% =========================================================
+% STEP 3: Build robust ray-space invalid mask
+%% =========================================================
+fprintf('\nSTEP 3: Building robust ray-space valid mask...\n');
+
+rayMask = buildRaySpaceMask(cfg);
+
+fprintf('Ray-space valid fraction = %.4f\n', nnz(rayMask.valid) / numel(rayMask.valid));
+fprintf('Valid x columns = [%d, %d]\n', rayMask.col1, rayMask.col2);
+
+%% =========================================================
+% STEP 4: First-frame mapping diagnostic
+%% =========================================================
+if cfg.show_debug_mapping
+    plotMappingDiagnostic(cfg, pRaw, rayMask);
+end
+
+%% =========================================================
+% STEP 5: PASS 1 - compute <Corr> and std(Corr)
+%% =========================================================
+fprintf('\nSTEP 5: PASS 1 - computing Corr_mean and Corr_std...\n');
+
+corrStats = pass1_computeCorrStats(cfg, pRaw, C_fit, rayMask);
+
+Corr_mean = corrStats.Co
+Corr_std  = corrStats.Corr_std;
+
+save(fullfile(cfg.output_dir, "Corr_mean_std.mat"), ...
+    "Corr_mean", "Corr_std", "corrStats", "-v7.3");
+
+fprintf('Saved Corr_mean and Corr_std.\n');
+
+%% =========================================================
+% STEP 6: PASS 2 - build I_e' and inverse-map to camera space
+%% =========================================================
+fprintf('\nSTEP 6: PASS 2 - building and saving I_e'' in ray and camera space...\n');
+
+pass2_buildAndSaveIePrime(cfg, pRaw, rayMask, Corr_mean);
+
+%% =========================================================
+% STEP 7: Diagnostics for one frame
+%% =========================================================
+fprintf('\nSTEP 7: Plotting diagnostic frame...\n');
+
+diag = computeFrameProductsFromFile(cfg.plot_diagnostic_frame, cfg, pRaw, C_fit, rayMask);
+diag.Ie_prime_ray = Corr_mean .* diag.I_e_ray;
+diag.Ie_prime_ray(rayMask.invalid) = NaN;
+
+[diag.Ie_prime_cam, diag.Ie_prime_cam_valid] = inverseRayToCamera( ...
+    diag.Ie_prime_ray, cfg, rayMask);
+
+plotFrameProductsDiagnostic(diag, Corr_mean, Corr_std, cfg);
+
+%% =========================================================
+% STEP 8: Print summary
+%% =========================================================
+fprintf('\nDone.\n');
+fprintf('Top fit R^2    = %.6f\n', starModel.gof_top.rsquare);
+fprintf('Bottom fit R^2 = %.6f\n', starModel.gof_bot.rsquare);
+fprintf('Propagation scheme = %s\n', cfg.propagation_scheme);
+fprintf('Output folder: %s\n', cfg.output_dir);

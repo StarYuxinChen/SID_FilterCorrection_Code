@@ -1,0 +1,109 @@
+function out = computeCorrForFrame(I_model_cam, I_raw_cam, frame, cfg, C_fit, rayMask)
+
+% ------------------------------------------------------
+% Size checks
+% ------------------------------------------------------
+if size(I_model_cam,1) ~= cfg.h_raw || size(I_model_cam,2) ~= cfg.w_raw
+    error('Model-input frame size mismatch at frame %d.', frame);
+end
+
+if size(I_raw_cam,1) ~= cfg.h_raw || size(I_raw_cam,2) ~= cfg.w_raw
+    error('Original raw frame size mismatch at frame %d.', frame);
+end
+
+% ------------------------------------------------------
+% Interpolate camera-space correction field C_k
+% ------------------------------------------------------
+C_k = interpolateCfitAtFrame( ...
+    C_fit, ...
+    cfg.fit_frame_centers, ...
+    frame, ...
+    cfg.min_positive_value);
+
+% ------------------------------------------------------
+% Map camera-space fields to ray/world space
+% ------------------------------------------------------
+I_model_ray = double(cfg.mapfun( ...
+    I_model_cam, cfg.x_map_file, cfg.y_map_file, cfg.h_raw, cfg.w_raw));
+
+I_raw_ray = double(cfg.mapfun( ...
+    I_raw_cam, cfg.x_map_file, cfg.y_map_file, cfg.h_raw, cfg.w_raw));
+
+C_k_ray = double(cfg.mapfun( ...
+    C_k, cfg.x_map_file, cfg.y_map_file, cfg.h_raw, cfg.w_raw));
+
+% ------------------------------------------------------
+% Mask invalid mapped region
+% ------------------------------------------------------
+I_model_ray(rayMask.invalid) = NaN;
+I_raw_ray(rayMask.invalid)   = NaN;
+C_k_ray(rayMask.invalid)     = NaN;
+
+% ------------------------------------------------------
+% Define concentration proxy C_s in ray space
+% ------------------------------------------------------
+C_s = I_model_ray ./ C_k_ray;
+
+C_s(~isfinite(C_s)) = NaN;
+C_s(C_s < 0) = NaN;
+
+% ------------------------------------------------------
+% Beer-Lambert / CN forward propagation
+%
+% Important:
+% propagateBeerLambertRay returns the propagated intensity sheet.
+% This is not yet the final predicted fluorescence image.
+% ------------------------------------------------------
+I_sheet = propagateBeerLambertRay(C_s, I_model_ray, cfg, rayMask);
+
+% ------------------------------------------------------
+% Final predicted image:
+%
+% I_f = intensity sheet * concentration proxy
+% ------------------------------------------------------
+I_f = I_sheet .* C_s;
+
+I_f(~isfinite(I_f)) = NaN;
+I_f(rayMask.invalid) = NaN;
+
+% ------------------------------------------------------
+% Corr = predicted image / original raw image
+%
+% Both I_f and I_raw_ray are in ray space.
+% ------------------------------------------------------
+Corr = nan(cfg.h_raw, cfg.w_raw);
+
+valid = isfinite(I_raw_ray) & ...
+        isfinite(I_f) & ...
+        abs(I_raw_ray) > cfg.min_positive_value;
+
+Corr(valid) = I_f(valid) ./ I_raw_ray(valid);
+
+Corr(rayMask.invalid) = NaN;
+
+% ------------------------------------------------------
+% Output
+% ------------------------------------------------------
+out = struct();
+
+out.frame = frame;
+
+% Camera-space inputs
+out.I_model_cam = I_model_cam;
+out.I_raw_cam   = I_raw_cam;
+
+% Ray-space fields
+out.I_model_ray = I_model_ray;
+out.I_raw_ray   = I_raw_ray;
+out.C_k         = C_k;
+out.C_k_ray     = C_k_ray;
+out.C_s         = C_s;
+
+% Beer-Lambert products
+out.I_sheet = I_sheet;
+out.I_f     = I_f;
+
+% Final correction
+out.Corr = Corr;
+
+end

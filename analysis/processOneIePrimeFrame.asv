@@ -1,0 +1,187 @@
+function processOneIePrimeFrame(k, frameIndex, inFile, cfg, blackBright, blackDark, backBright, backDark)
+
+    fprintf('Processing frame %d (%d)\n', frameIndex, k);
+
+    %% -----------------------------------------------------
+    % 1. Load existing I_e' frame
+    %% -----------------------------------------------------
+    % S = load(inFile);
+    % 
+    % Ie_prime_cam = extractIePrimeCamera(S, inFile);
+    % 
+    % Ie_prime_cam = double(Ie_prime_cam);
+    % 
+    % if ~isequal(size(Ie_prime_cam), [cfg.h, cfg.w])
+    %     error('Ie_prime_cam size mismatch in %s. Expected [%d %d].', ...
+    %         inFile, cfg.h, cfg.w);
+    % end
+    % 
+    % % Do not flip here.
+    % % Keep the saved camera-space orientation.
+    % im = dfiRegion(Ie_prime_cam, cfg.xMin, cfg.xMax, cfg.yMin, cfg.yMax);
+    S = load(inFile);
+
+    Ie_prime_cam = extractIePrimeCamera(S, inFile);
+    Ie_prime_cam = double(Ie_prime_cam);
+    
+    do_debug = false;
+    if isfield(cfg, 'debug') && cfg.debug
+        if isfield(cfg, 'debug_frames')
+            do_debug = ismember(frameIndex, cfg.debug_frames);
+        else
+            do_debug = true;
+        end
+    end
+    
+    if do_debug
+        saveDebugImage(Ie_prime_cam, ...
+            fullfile(cfg.debug_dir, sprintf('01_loaded_Ie_prime_cam_%05d.png', frameIndex)), ...
+            sprintf('01 loaded Ie prime cam, frame %d', frameIndex));
+    end
+    
+    if ~isequal(size(Ie_prime_cam), [cfg.h, cfg.w])
+        error('Ie_prime_cam size mismatch in %s. Expected [%d %d].', ...
+            inFile, cfg.h, cfg.w);
+    end
+    
+    % ---------------------------------------------------------
+    % Important:
+    % Do NOT feed NaN / zero holes into Stefan's correction.
+    % Fill invalid inverse-mapped regions using the original raw camera image.
+    % ---------------------------------------------------------
+    valid_cam = isfinite(Ie_prime_cam);
+    
+    if isfield(S, 'Ie_prime_cam_valid')
+        valid_cam = valid_cam & logical(S.Ie_prime_cam_valid);
+    end
+    
+    if isfield(S, 'I_e_cam')
+        I_e_cam_raw = double(S.I_e_cam);
+    
+        if ~isequal(size(I_e_cam_raw), size(Ie_prime_cam))
+            error('I_e_cam size mismatch in %s.', inFile);
+        end
+    
+        Ie_prime_cam_for_stefan = Ie_prime_cam;
+    
+        % Fill invalid pixels with original raw image, not zero.
+        Ie_prime_cam_for_stefan(~valid_cam) = I_e_cam_raw(~valid_cam);
+    else
+        warning('I_e_cam not found in %s. Filling invalid pixels with nearest finite median.', inFile);
+    
+        Ie_prime_cam_for_stefan = Ie_prime_cam;
+        medVal = median(Ie_prime_cam(isfinite(Ie_prime_cam)), 'all');
+        Ie_prime_cam_for_stefan(~valid_cam) = medVal;
+    end
+    
+    % Do not flip here.
+    im = dfiRegion(Ie_prime_cam_for_stefan, cfg.xMin, cfg.xMax, cfg.yMin, cfg.yMax);
+
+    %% -----------------------------------------------------
+    % 2. Stefan original parity logic
+    %% -----------------------------------------------------
+    if mod(frameIndex, 2) == 0
+        rhoI = double(im) - blackBright;
+        back = backBright;
+    else
+        rhoI = double(im) - blackDark;
+        back = backDark;
+    end
+
+    rhoI(~isfinite(rhoI)) = 0;
+    rhoI(rhoI < 0) = 0;
+
+    if cfg.use_pre_filter
+        rhoI = filtWindow(rhoI, cfg.pre_filter_window, cfg.pre_filter_arg2, cfg.pre_filter_arg3);
+    end
+
+    rhoIRaw = rhoI;
+
+    %% -----------------------------------------------------
+    % 3. Stefan-style correction function
+    %% -----------------------------------------------------
+    % Expected function signature:
+    % [corr, mapped, streakRM, illFix, laser, laserRhoI] =
+    %     corr_PLIF_20250906(rhoI, back, x_map_file, y_map_file,
+    %                        w, h, C0, streaks, synthetic_laser,
+    %                        Level, Sigma, LS, LE, resize, fftPad)
+    %
+    [corr_stripe, mapped, streakRM, illFix, laser, laserRhoI] = feval( ...
+        cfg.corrfun_name, ...
+        rhoI, ...
+        back, ...
+        cfg.x_map_file, ...
+        cfg.y_map_file, ...
+        cfg.w, ...
+        cfg.h, ...
+        cfg.C0, ...
+        cfg.streaks, ...
+        cfg.synthetic_laser, ...
+        cfg.Level, ...
+        cfg.Sigma, ...
+        cfg.LS, ...
+        cfg.LE, ...
+        cfg.resize, ...
+        cfg.fftPad);
+
+    %% -----------------------------------------------------
+    % 4. Optional post-filter
+    %% -----------------------------------------------------
+    if cfg.use_post_filter
+        corr_filt = filtWindow(corr_stripe, cfg.post_window_size, cfg.post_filtType);
+    else
+        corr_filt = corr_stripe;
+    end
+
+    %% -----------------------------------------------------
+    % 5. Optional final lab/target mapping
+    %% -----------------------------------------------------
+    if cfg.apply_final_lab_map
+        corr_final = mapTo(corr_filt, cfg.x_map_lab, cfg.y_map_lab, cfg.h, cfg.w, false);
+    else
+        corr_final = corr_filt;
+    end
+
+    %% -----------------------------------------------------
+    % 6. Save output
+    %% -----------------------------------------------------
+    outMat = fullfile(cfg.output_dir, sprintf('final_corr_from_IePrime_%05d.mat', frameIndex));
+
+    if cfg.save_mat
+        if cfg.save_debug_products
+            save(outMat, ...
+                'frameIndex', ...
+                'inFile', ...
+                'Ie_prime_cam', ...
+                'rhoIRaw', ...
+                'corr_stripe', ...
+                'corr_filt', ...
+                'corr_final', ...
+                'mapped', ...
+                'streakRM', ...
+                'illFix', ...
+                'laser', ...
+                'laserRhoI', ...
+                '-v7.3');
+        else
+            save(outMat, ...
+                'frameIndex', ...
+                'inFile', ...
+                'rhoIRaw', ...
+                'corr_final', ...
+                '-v7.3');
+        end
+    end
+
+    if cfg.save_tif_preview
+        outTif = fullfile(cfg.output_dir, sprintf('final_corr_from_IePrime_%05d.tif', frameIndex));
+
+        img = corr_final;
+        img(~isfinite(img)) = 0;
+
+        % This tif is for visual preview only.
+        % Quantitative data are saved in the .mat file.
+        imgPreview = mat2gray(img);
+        imwrite(imgPreview, outTif);
+    end
+end

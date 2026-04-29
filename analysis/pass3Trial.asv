@@ -1,0 +1,729 @@
+clear; clc; close all;
+fclose('all');
+
+%% =========================================================
+% PASS 3:
+% Use PASS 2 Ie_prime_cam_frame_#####.mat frames as input to
+% Stefan-style PLIF correction.
+%
+% Input from PASS 2:
+%   Ie_prime_cam_frame_#####.mat
+%
+% Main input image for Stefan:
+%   Prefer Ie_prime_cam_filled
+%
+% Reason:
+%   Ie_prime_cam contains NaNs outside inverse-mapped valid region.
+%   Stefan-style correction should not receive NaNs.
+%
+% Important:
+%   - Do NOT flip data here.
+%   - Any flip is only for plotting.
+%   - Keep Stefan's black-field/background logic.
+%% =========================================================
+
+%% =========================================================
+% BASIC CONFIG
+%% =========================================================
+cfg = struct();
+
+cfg.use_parallel = true;
+cfg.numWorkers = 10;
+
+%% =========================================================
+% PATH SETUP
+%% =========================================================
+% Add your source paths before starting parpool.
+% Workers normally inherit path if the pool is started after addpath.
+
+cfg.src_paths = [
+    "V:\202311\w318\LIF-Processing\src"
+    "V:\202311\w310\src"
+];
+
+for pp = 1:numel(cfg.src_paths)
+    if exist(cfg.src_paths(pp), 'dir')
+        addpath(char(cfg.src_paths(pp)));
+        fprintf('Added path: %s\n', cfg.src_paths(pp));
+    else
+        warning('Source path does not exist: %s', cfg.src_paths(pp));
+    end
+end
+
+%% =========================================================
+% PARALLEL POOL
+%% =========================================================
+if cfg.use_parallel
+    pool = gcp('nocreate');
+
+    if isempty(pool)
+        disp('No active parallel pool.');
+        parpool('local', cfg.numWorkers);
+    else
+        disp(['Parallel pool with ', num2str(pool.NumWorkers), ...
+            ' workers is active and will be closed']);
+        delete(gcp('nocreate'));
+        parpool('local', cfg.numWorkers);
+    end
+end
+
+%% =========================================================
+% INPUT IePrime FILES FROM PASS 2
+%% =========================================================
+% This must match PASS 2 output_dir.
+cfg.ieprime_dir = "V:\202311\w318\LIF-Processing\outputs\IePrime_frames_cropMasked_test";
+cfg.ieprime_pattern = "Ie_prime_cam_frame_%05d.mat";
+
+% Test first.
+cfg.frame_list = 15000:20:15040;
+
+% Later, use:
+% cfg.frame_list = 15000:20:18420;
+
+%% =========================================================
+% STEFAN ORIGINAL BACKGROUND INPUTS
+%% =========================================================
+% Keep black field logic unchanged.
+fIn2 = "V:\202311\w318\LIF-Processing\inputs\CamC_black.dfi";
+fIn3 = fIn2;
+
+% Corrected bright image generated from your Star correction model.
+% Keep this as you currently use it.
+fIn4_mat = "V:\202311\w318\LIF-Processing\inputs\CamC_bright_corrected_frame_70000.mat";
+fIn5_mat = fIn4_mat; %#ok<NASGU>
+
+%% =========================================================
+% MAPPING FILES USED INSIDE STEFAN CORRECTION
+%% =========================================================
+cfg.x_map_file = "V:\202311\w318\LIF-Processing\inputs\w318_ribbon_test2_x_map.txt";
+cfg.y_map_file = "V:\202311\w318\LIF-Processing\inputs\w318_ribbon_test2_y_map.txt";
+
+% Optional final lab/target map.
+% Keep false unless you really want another final mapping step.
+cfg.apply_final_lab_map = false;
+cfg.x_map_lab = "";
+cfg.y_map_lab = "";
+
+%% =========================================================
+% DOMAIN DETAILS
+%% =========================================================
+% Keep your current value, but please double-check whether Stefan's
+% original w318 setup used C0 = 0.5 or 0.8.
+cfg.C0 = 0.5;
+
+cfg.yMin = 0;
+cfg.yMax = 1024;
+cfg.xMin = 0;
+cfg.xMax = 3320;
+
+cfg.w = cfg.xMax - cfg.xMin;
+cfg.h = cfg.yMax - cfg.yMin;
+
+cfg.px_per_mm = 22;
+cfg.x_raw_mm = (0:cfg.w-1) / cfg.px_per_mm;
+cfg.z_plot_mm = (0:cfg.h-1) / cfg.px_per_mm;
+
+%% =========================================================
+% CORRECTION FUNCTION
+%% =========================================================
+% Choose the actual function you have on path.
+cfg.corrfun_name = 'corr_PLIF_20250906';
+
+% If your actual function is this one, switch it:
+% cfg.corrfun_name = 'correct_Plif_MI_20250906';
+
+if exist(cfg.corrfun_name, 'file') ~= 2
+    error('Could not find function: %s. Please check function name/path.', ...
+        cfg.corrfun_name);
+end
+
+fprintf('\nUsing correction function:\n%s\n', cfg.corrfun_name);
+
+%% =========================================================
+% STEFAN-STYLE FILTER / CORRECTION SETTINGS
+%% =========================================================
+cfg.use_pre_filter = true;
+cfg.pre_filter_window = 15;
+cfg.pre_filter_arg2 = 4;
+cfg.pre_filter_arg3 = 2;
+
+cfg.streaks = true;
+cfg.synthetic_laser = true;
+cfg.Level = 200;
+cfg.Sigma = 10;
+cfg.LS = 1;
+cfg.LE = 10;
+cfg.resize = 4;
+cfg.fftPad = 4;
+
+cfg.use_post_filter = false;
+cfg.post_window_size = 8;
+cfg.post_filtType = 3;
+
+%% =========================================================
+% INPUT SELECTION FROM PASS 2 MAT FILE
+%% =========================================================
+% Recommended:
+%   use Ie_prime_cam_filled because Stefan cannot handle NaNs safely.
+%
+% Options:
+%   'filled'  : use Ie_prime_cam_filled if available
+%   'nan_fill': use Ie_prime_cam, then fill NaNs with I_e_cam_full
+%   'raw_nan' : use Ie_prime_cam directly, not recommended
+cfg.ieprime_input_mode = 'filled';
+
+%% =========================================================
+% OUTPUT
+%% =========================================================
+cfg.output_dir = "V:\202311\w318\LIF-Processing\outputs\Final_processed_from_IePrime_cropMasked_test";
+
+if ~exist(cfg.output_dir, 'dir')
+    mkdir(cfg.output_dir);
+end
+
+cfg.save_mat = true;
+cfg.save_tif_preview = true;
+cfg.save_debug_products = true;
+
+cfg.debug = true;
+cfg.debug_frames = [15000];
+cfg.debug_dir = fullfile(cfg.output_dir, 'debug_processOne');
+
+if cfg.debug && ~exist(cfg.debug_dir, 'dir')
+    mkdir(cfg.debug_dir);
+end
+
+%% =========================================================
+% READ BLACK FIELD AND BRIGHT FIELD
+%% =========================================================
+fprintf('\nReading black field from:\n%s\n', fIn2);
+
+backBrightDfi = dfi2mat(fIn2);
+backDarkDfi   = dfi2mat(fIn3);
+
+blackBright = double(backBrightDfi.image);
+blackDark   = double(backDarkDfi.image);
+
+fprintf('\nReading corrected bright field from:\n%s\n', fIn4_mat);
+
+Sbright = load(fIn4_mat);
+
+if isfield(Sbright, 'Bright_corrected')
+    DyeBright = double(Sbright.Bright_corrected);
+elseif isfield(Sbright, 'Bright_raw')
+    warning('Bright_corrected not found. Using Bright_raw instead.');
+    DyeBright = double(Sbright.Bright_raw);
+else
+    error('Neither Bright_corrected nor Bright_raw found in %s.', fIn4_mat);
+end
+
+DyeDark = DyeBright;
+
+% Stefan original logic:
+% background = bright image - black image
+backBright = DyeBright - blackBright;
+backDark   = DyeDark   - blackDark;
+
+backBright(backBright < 0) = 0;
+backDark(backDark < 0) = 0;
+
+fprintf('\nblackBright size = %d x %d\n', size(blackBright,1), size(blackBright,2));
+fprintf('backBright  size = %d x %d\n', size(backBright,1), size(backBright,2));
+
+if ~isequal(size(blackBright), [cfg.h, cfg.w])
+    error('blackBright size mismatch. Expected [%d %d].', cfg.h, cfg.w);
+end
+
+if ~isequal(size(backBright), [cfg.h, cfg.w])
+    error('backBright size mismatch. Expected [%d %d].', cfg.h, cfg.w);
+end
+
+printImageStats('blackBright', blackBright);
+printImageStats('backBright = DyeBright - blackBright', backBright);
+
+%% =========================================================
+% BUILD INPUT FILE LIST
+%% =========================================================
+nFrames = numel(cfg.frame_list);
+
+input_files = strings(nFrames,1);
+file_exists = false(nFrames,1);
+
+for k = 1:nFrames
+    frameIndex = cfg.frame_list(k);
+    input_files(k) = fullfile(cfg.ieprime_dir, sprintf(cfg.ieprime_pattern, frameIndex));
+    file_exists(k) = exist(input_files(k), 'file') == 2;
+end
+
+if any(~file_exists)
+    missingFrames = cfg.frame_list(~file_exists);
+    warning('Some IePrime files are missing. They will be skipped.');
+    disp(missingFrames(:)');
+end
+
+frame_list_run = cfg.frame_list(file_exists);
+input_files_run = input_files(file_exists);
+
+nRun = numel(frame_list_run);
+
+fprintf('\nNumber of frames requested = %d\n', nFrames);
+fprintf('Number of frames found     = %d\n', nRun);
+fprintf('IePrime input folder:\n%s\n', cfg.ieprime_dir);
+fprintf('Output folder:\n%s\n', cfg.output_dir);
+
+if nRun == 0
+    error('No input IePrime files found. Please check cfg.ieprime_dir and cfg.ieprime_pattern.');
+end
+
+%% =========================================================
+% PROCESS FRAMES
+%% =========================================================
+tic;
+
+if cfg.use_parallel
+
+    parfor k = 1:nRun
+        processOneIePrimeFrame( ...
+            k, ...
+            frame_list_run(k), ...
+            input_files_run(k), ...
+            cfg, ...
+            blackBright, ...
+            blackDark, ...
+            backBright, ...
+            backDark);
+    end
+
+else
+
+    for k = 1:nRun
+        processOneIePrimeFrame( ...
+            k, ...
+            frame_list_run(k), ...
+            input_files_run(k), ...
+            cfg, ...
+            blackBright, ...
+            blackDark, ...
+            backBright, ...
+            backDark);
+    end
+end
+
+elapsedTime = toc;
+
+fprintf('\nDone. Final processed frames saved to:\n%s\n', cfg.output_dir);
+fprintf('Elapsed time = %.2f s\n', elapsedTime);
+
+if cfg.use_parallel
+    delete(gcp('nocreate'));
+end
+
+%% =========================================================
+% LOCAL FUNCTIONS
+%% =========================================================
+
+function processOneIePrimeFrame(k, frameIndex, inputFile, cfg, ...
+                                blackBright, blackDark, backBright, backDark)
+
+    fprintf('\nProcessing frame %d (%d)\n', frameIndex, k);
+    fprintf('Input file: %s\n', inputFile);
+
+    %% ---------------------------------------------------------
+    % 1. Load IePrime MAT file from PASS 2
+    %% ---------------------------------------------------------
+    S = load(inputFile);
+
+    [Ie_for_stefan, valid_cam, inputVariableUsed] = extractIePrimeForStefan(S, cfg);
+
+    if ~isequal(size(Ie_for_stefan), [cfg.h, cfg.w])
+        error('IePrime size mismatch in frame %d. Expected [%d %d], got [%d %d].', ...
+            frameIndex, cfg.h, cfg.w, size(Ie_for_stefan,1), size(Ie_for_stefan,2));
+    end
+
+    %% ---------------------------------------------------------
+    % 2. Select black/background image
+    %
+    % In this script fIn2 == fIn3 and DyeDark == DyeBright,
+    % so bright/dark parity does not change the result.
+    %% ---------------------------------------------------------
+    if mod(frameIndex, 2) == 0
+        black = blackBright;
+        back  = backBright;
+        parityLabel = "bright/even";
+    else
+        black = blackDark;
+        back  = backDark;
+        parityLabel = "dark/odd";
+    end
+
+    %% ---------------------------------------------------------
+    % 3. Stefan-style black subtraction
+    %% ---------------------------------------------------------
+    rhoI = double(Ie_for_stefan);
+
+    % This is important: Stefan correction should not receive NaNs.
+    rhoI(~isfinite(rhoI)) = 0;
+
+    rhoIRaw = rhoI - black;
+
+    rhoIRaw(~isfinite(rhoIRaw)) = 0;
+    rhoIRaw(rhoIRaw < 0) = 0;
+
+    %% ---------------------------------------------------------
+    % 4. Optional pre-filter
+    %% ---------------------------------------------------------
+    rhoI_for_corr = rhoIRaw;
+
+    if cfg.use_pre_filter
+
+        if exist('filtWindow', 'file') == 2
+            rhoI_for_corr = filtWindow( ...
+                rhoI_for_corr, ...
+                cfg.pre_filter_window, ...
+                cfg.pre_filter_arg2, ...
+                cfg.pre_filter_arg3);
+        else
+            warning('filtWindow not found. Skipping pre-filter for frame %d.', frameIndex);
+        end
+
+        rhoI_for_corr(~isfinite(rhoI_for_corr)) = 0;
+        rhoI_for_corr(rhoI_for_corr < 0) = 0;
+    end
+
+    %% ---------------------------------------------------------
+    % 5. Call Stefan-style correction function
+    %% ---------------------------------------------------------
+    [corr, mapped, streakRM, illFix, laser, laserRhoI] = feval( ...
+        cfg.corrfun_name, ...
+        rhoI_for_corr, ...
+        back, ...
+        cfg.x_map_file, ...
+        cfg.y_map_file, ...
+        cfg.w, ...
+        cfg.h, ...
+        cfg.C0, ...
+        cfg.streaks, ...
+        cfg.synthetic_laser, ...
+        cfg.Level, ...
+        cfg.Sigma, ...
+        cfg.LS, ...
+        cfg.LE, ...
+        cfg.resize, ...
+        cfg.fftPad);
+
+    corr_final = corr;
+
+    %% ---------------------------------------------------------
+    % 6. Optional post-filter
+    %% ---------------------------------------------------------
+    if cfg.use_post_filter
+
+        if exist('filtWindow', 'file') == 2
+            corr_final = filtWindow( ...
+                corr_final, ...
+                cfg.post_window_size, ...
+                cfg.post_filtType);
+        else
+            warning('filtWindow not found. Skipping post-filter for frame %d.', frameIndex);
+        end
+    end
+
+    corr_final(~isfinite(corr_final)) = NaN;
+
+    %% ---------------------------------------------------------
+    % 7. Optional final lab mapping
+    %% ---------------------------------------------------------
+    if cfg.apply_final_lab_map
+
+        if strlength(cfg.x_map_lab) == 0 || strlength(cfg.y_map_lab) == 0
+            error('apply_final_lab_map=true but x_map_lab/y_map_lab are empty.');
+        end
+
+        corr_final = mapTo( ...
+            corr_final, ...
+            cfg.x_map_lab, ...
+            cfg.y_map_lab, ...
+            cfg.h, ...
+            cfg.w, ...
+            false);
+    end
+
+    %% ---------------------------------------------------------
+    % 8. Save outputs
+    %% ---------------------------------------------------------
+    outMat = fullfile(cfg.output_dir, ...
+        sprintf("final_corr_from_IePrime_%05d.mat", frameIndex));
+
+    outTif = fullfile(cfg.output_dir, ...
+        sprintf("final_corr_from_IePrime_%05d.tif", frameIndex));
+
+    if cfg.save_mat
+
+        if cfg.save_debug_products
+
+            save(outMat, ...
+                'frameIndex', ...
+                'inputFile', ...
+                'inputVariableUsed', ...
+                'valid_cam', ...
+                'parityLabel', ...
+                'rhoI', ...
+                'rhoIRaw', ...
+                'rhoI_for_corr', ...
+                'back', ...
+                'corr', ...
+                'mapped', ...
+                'streakRM', ...
+                'illFix', ...
+                'laser', ...
+                'laserRhoI', ...
+                'corr_final', ...
+                'cfg', ...
+                '-v7.3');
+
+        else
+
+            save(outMat, ...
+                'frameIndex', ...
+                'inputFile', ...
+                'inputVariableUsed', ...
+                'parityLabel', ...
+                'corr_final', ...
+                'cfg', ...
+                '-v7.3');
+        end
+
+        fprintf('Saved MAT: %s\n', outMat);
+    end
+
+    if cfg.save_tif_preview
+        writeTifPreview(corr_final, outTif);
+        fprintf('Saved TIF preview: %s\n', outTif);
+    end
+
+    %% ---------------------------------------------------------
+    % 9. Debug figures
+    %% ---------------------------------------------------------
+    if cfg.debug && ismember(frameIndex, cfg.debug_frames)
+
+        saveDebugImagePhysical(Ie_for_stefan, ...
+            fullfile(cfg.debug_dir, sprintf("01_Ie_for_stefan_%05d.png", frameIndex)), ...
+            sprintf("01 Ie input to Stefan, frame %d, %s", frameIndex, inputVariableUsed), ...
+            cfg, robustClim(Ie_for_stefan));
+
+        saveDebugImagePhysical(double(valid_cam), ...
+            fullfile(cfg.debug_dir, sprintf("02_valid_cam_%05d.png", frameIndex)), ...
+            sprintf("02 valid camera mask from PASS 2, frame %d", frameIndex), ...
+            cfg, [0 1]);
+
+        saveDebugImagePhysical(rhoIRaw, ...
+            fullfile(cfg.debug_dir, sprintf("03_rhoIRaw_after_black_subtraction_%05d.png", frameIndex)), ...
+            sprintf("03 rhoIRaw after black subtraction, frame %d", frameIndex), ...
+            cfg, robustClim(rhoIRaw));
+
+        saveDebugImagePhysical(rhoI_for_corr, ...
+            fullfile(cfg.debug_dir, sprintf("04_rhoI_for_corr_%05d.png", frameIndex)), ...
+            sprintf("04 rhoI passed to correction, frame %d", frameIndex), ...
+            cfg, robustClim(rhoI_for_corr));
+
+        saveDebugImagePhysical(back, ...
+            fullfile(cfg.debug_dir, sprintf("05_back_used_%05d.png", frameIndex)), ...
+            sprintf("05 background used, frame %d", frameIndex), ...
+            cfg, robustClim(back));
+
+        saveDebugImagePhysical(corr, ...
+            fullfile(cfg.debug_dir, sprintf("06_corr_output_%05d.png", frameIndex)), ...
+            sprintf("06 corr output, frame %d", frameIndex), ...
+            cfg, robustClim(corr));
+
+        saveDebugImagePhysical(corr_final, ...
+            fullfile(cfg.debug_dir, sprintf("07_corr_final_%05d.png", frameIndex)), ...
+            sprintf("07 corr final, frame %d", frameIndex), ...
+            cfg, robustClim(corr_final));
+    end
+
+    fprintf('Finished frame %d.\n', frameIndex);
+end
+
+function [Ie_for_stefan, valid_cam, inputVariableUsed] = extractIePrimeForStefan(S, cfg)
+
+    valid_cam = [];
+
+    switch lower(cfg.ieprime_input_mode)
+
+        case 'filled'
+
+            if isfield(S, 'Ie_prime_cam_filled')
+                Ie_for_stefan = double(S.Ie_prime_cam_filled);
+                inputVariableUsed = "Ie_prime_cam_filled";
+            elseif isfield(S, 'Ie_prime_cam')
+                Ie_for_stefan = double(S.Ie_prime_cam);
+                inputVariableUsed = "Ie_prime_cam_fallback";
+            else
+                error('Neither Ie_prime_cam_filled nor Ie_prime_cam found.');
+            end
+
+        case 'nan_fill'
+
+            if ~isfield(S, 'Ie_prime_cam')
+                error('Ie_prime_cam not found for nan_fill mode.');
+            end
+
+            Ie_for_stefan = double(S.Ie_prime_cam);
+            inputVariableUsed = "Ie_prime_cam_nan_filled_with_raw";
+
+        case 'raw_nan'
+
+            if ~isfield(S, 'Ie_prime_cam')
+                error('Ie_prime_cam not found for raw_nan mode.');
+            end
+
+            Ie_for_stefan = double(S.Ie_prime_cam);
+            inputVariableUsed = "Ie_prime_cam_raw_nan";
+
+        otherwise
+
+            error('Unknown cfg.ieprime_input_mode: %s', cfg.ieprime_input_mode);
+    end
+
+    if isfield(S, 'Ie_prime_cam_valid')
+        valid_cam = logical(S.Ie_prime_cam_valid);
+    else
+        valid_cam = isfinite(Ie_for_stefan);
+    end
+
+    % If requested or necessary, fill NaNs with original raw I_e.
+    if strcmpi(cfg.ieprime_input_mode, 'nan_fill') || ...
+            (any(~isfinite(Ie_for_stefan(:))) && ~strcmpi(cfg.ieprime_input_mode, 'raw_nan'))
+
+        if isfield(S, 'I_e_cam_full')
+            I_e_cam_full = double(S.I_e_cam_full);
+            fillMask = ~isfinite(Ie_for_stefan);
+            Ie_for_stefan(fillMask) = I_e_cam_full(fillMask);
+        elseif isfield(S, 'I_e_cam')
+            I_e_cam = double(S.I_e_cam);
+            fillMask = ~isfinite(Ie_for_stefan) & isfinite(I_e_cam);
+            Ie_for_stefan(fillMask) = I_e_cam(fillMask);
+
+            % Any remaining NaNs become zero.
+            Ie_for_stefan(~isfinite(Ie_for_stefan)) = 0;
+        else
+            warning('No original I_e found. Replacing remaining NaNs with zero.');
+            Ie_for_stefan(~isfinite(Ie_for_stefan)) = 0;
+        end
+    end
+
+    if strcmpi(cfg.ieprime_input_mode, 'raw_nan')
+        % Not recommended, but keep exactly as requested.
+        return;
+    end
+
+    Ie_for_stefan(~isfinite(Ie_for_stefan)) = 0;
+end
+
+function writeTifPreview(A, outFile)
+
+    A = double(A);
+    vals = A(isfinite(A));
+
+    if isempty(vals)
+        B = zeros(size(A), 'uint16');
+    else
+        clim = prctile(vals, [1 99]);
+
+        if ~all(isfinite(clim)) || clim(2) <= clim(1)
+            clim = [min(vals), max(vals)];
+        end
+
+        if ~all(isfinite(clim)) || clim(2) <= clim(1)
+            B = zeros(size(A), 'uint16');
+        else
+            B = (A - clim(1)) ./ (clim(2) - clim(1));
+            B = max(0, min(1, B));
+            B(~isfinite(B)) = 0;
+            B = uint16(round(B * 65535));
+        end
+    end
+
+    imwrite(B, char(outFile));
+end
+
+function clim = robustClim(A)
+
+    A = double(A);
+    vals = A(isfinite(A));
+
+    if isempty(vals)
+        clim = [];
+        return;
+    end
+
+    clim = prctile(vals, [1 99]);
+
+    if ~all(isfinite(clim)) || clim(2) <= clim(1)
+        clim = [min(vals), max(vals)];
+    end
+
+    if ~all(isfinite(clim)) || clim(2) <= clim(1)
+        clim = [];
+    end
+end
+
+function printImageStats(name, A)
+
+    A = double(A);
+    vals = A(isfinite(A));
+
+    if isempty(vals)
+        fprintf('\n%s: no finite values.\n', name);
+        return;
+    end
+
+    fprintf('\n%s\n', name);
+    fprintf('  size      = %d x %d\n', size(A,1), size(A,2));
+    fprintf('  finite %%  = %.2f %%\n', 100 * numel(vals) / numel(A));
+    fprintf('  min       = %.6g\n', min(vals));
+    fprintf('  p01       = %.6g\n', prctile(vals, 1));
+    fprintf('  p50       = %.6g\n', prctile(vals, 50));
+    fprintf('  p99       = %.6g\n', prctile(vals, 99));
+    fprintf('  max       = %.6g\n', max(vals));
+end
+
+function saveDebugImagePhysical(A, outFile, figTitle, cfg, clim_use)
+
+    A = double(A);
+
+    fig = figure('Visible', 'off');
+
+    if size(A,1) == cfg.h && size(A,2) == cfg.w
+
+        % Plot only. Do not flip data in computation.
+        imagesc(cfg.x_raw_mm, cfg.z_plot_mm, flipud(A));
+        xlabel('x (mm)');
+        ylabel('z from bottom (mm)');
+        set(gca, 'YDir', 'normal');
+
+    else
+
+        imagesc(A);
+        xlabel('column');
+        ylabel('row');
+        set(gca, 'YDir', 'reverse');
+    end
+
+    axis image;
+    colorbar;
+    title(figTitle, 'Interpreter', 'none');
+
+    if nargin >= 5 && ~isempty(clim_use)
+        if all(isfinite(clim_use)) && clim_use(2) > clim_use(1)
+            caxis(clim_use);
+        end
+    end
+
+    outFile = char(outFile);
+
+    drawnow;
+    exportgraphics(fig, outFile, 'Resolution', 200);
+    close(fig);
+end
